@@ -1,44 +1,29 @@
 // Auto Run Command Extension for Antigravity
 // Tự động accept tất cả command approval prompts của agent
-// Sử dụng Antigravity internal VS Code commands
 //
-// Command IDs extracted from:
-// D:\Antigravity\resources\app\out\vs\workbench\workbench.desktop.main.js
+// Approach: Set Antigravity's built-in settings to auto-approve mode
+// Settings found in workbench.desktop.main.js:
+//   - chat.tools.terminal.enableAutoApprove → auto-approve terminal commands
+//   - chat.editing.autoAcceptDelay → auto-accept file edits (0 = instant)
+//   - chat.agent.terminal.autoApprove → terminal auto-approve rules
 
 const vscode = require('vscode');
-const fs = require('fs');
-
-const DEBUG_OUTPUT_FILE = 'd:\\Antigravity\\Extension\\Auto Run Command\\debug_output.txt';
 
 /** @type {vscode.StatusBarItem} */
 let statusBarItem;
 /** @type {vscode.OutputChannel} */
 let outputChannel;
-/** @type {NodeJS.Timeout|null} */
-let pollingInterval = null;
 /** @type {boolean} */
 let isEnabled = true;
-/** @type {number} */
-let acceptCount = 0;
 
-// ============================================================
-// Antigravity Internal Command IDs
-// ============================================================
+// Original settings backup for restore on disable
+let originalSettings = {};
 
-// Focus commands - must be called first to satisfy context keys
-const FOCUS_COMMANDS = [
-    'antigravity.agentPanel.focus',
-];
-
-// Accept commands - called after focus
-const ACCEPT_COMMANDS = [
-    'antigravity.agent.acceptAgentStep',
-    'antigravity.command.accept',
-    'antigravity.terminalCommand.accept',
-    'antigravity.terminalCommand.run',
-    'antigravity.prioritized.agentAcceptAllInFile',
-    'antigravity.prioritized.agentAcceptFocusedHunk',
-];
+// Settings to force auto-approve
+const AUTO_APPROVE_SETTINGS = {
+    'chat.tools.terminal.enableAutoApprove': true,
+    'chat.editing.autoAcceptDelay': 0,
+};
 
 /**
  * @param {vscode.ExtensionContext} context
@@ -64,96 +49,94 @@ function activate(context) {
     const toggleCmd = vscode.commands.registerCommand('autoRunCommand.toggle', () => {
         isEnabled = !isEnabled;
         updateStatusBar();
-        const msg = isEnabled
-            ? '✅ Auto Run Command: ENABLED'
-            : '⏸️ Auto Run Command: DISABLED';
-        log(msg);
-        vscode.window.showInformationMessage(msg);
-        if (isEnabled) startPolling();
-        else stopPolling();
+        if (isEnabled) {
+            applyAutoApproveSettings();
+            log('✅ Auto Run Command: ENABLED - settings applied');
+            vscode.window.showInformationMessage('✅ Auto Run Command: ENABLED');
+        } else {
+            restoreOriginalSettings();
+            log('⏸️ Auto Run Command: DISABLED - settings restored');
+            vscode.window.showInformationMessage('⏸️ Auto Run Command: DISABLED');
+        }
     });
 
     const showLogCmd = vscode.commands.registerCommand('autoRunCommand.showLog', () => {
         outputChannel.show();
     });
 
-    // DEBUG command
+    // DEBUG command - list all chat/agent settings
     const debugCmd = vscode.commands.registerCommand('autoRunCommand.debug', async () => {
         outputChannel.show();
-        const debugLines = [];
-        const debugLog = (msg) => { log(msg); debugLines.push(msg); };
+        log('═══════════════════════════════════');
+        log('🔍 DEBUG: Current auto-approve settings');
+        log('═══════════════════════════════════');
 
-        debugLog('═══════════════════════════════════');
-        debugLog('🔍 DEBUG: Listing all Antigravity commands...');
-        debugLog('═══════════════════════════════════');
+        const chatConfig = vscode.workspace.getConfiguration('chat');
+        const allChatKeys = [
+            'tools.terminal.enableAutoApprove',
+            'tools.terminal.autoApprove',
+            'tools.terminal.ignoreDefaultAutoApproveRules',
+            'agent.terminal.autoApprove',
+            'editing.autoAcceptDelay',
+            'editing.confirmEditRequestRemoval',
+        ];
 
-        const allCommands = await vscode.commands.getCommands(true);
-        const antigravityCommands = allCommands.filter(c =>
-            c.toLowerCase().includes('antigravity') ||
-            c.toLowerCase().includes('cascade') ||
-            c.toLowerCase().includes('agent')
-        ).sort();
-
-        debugLog(`Found ${antigravityCommands.length} relevant commands:\n`);
-        for (const cmd of antigravityCommands) {
-            const isInOurList = ACCEPT_COMMANDS.includes(cmd) ? ' ← ACCEPT' :
-                FOCUS_COMMANDS.includes(cmd) ? ' ← FOCUS' : '';
-            debugLog(`  ${cmd}${isInOurList}`);
-        }
-
-        debugLog('\n═══════════════════════════════════');
-        debugLog('🎯 Our commands:');
-        for (const cmd of [...FOCUS_COMMANDS, ...ACCEPT_COMMANDS]) {
-            const exists = allCommands.includes(cmd);
-            debugLog(`  ${exists ? '✅' : '❌'} ${cmd}`);
-        }
-
-        // Test with focus first
-        debugLog('\n🧪 Testing with FOCUS first...');
-        try {
-            await vscode.commands.executeCommand('antigravity.agentPanel.focus');
-            debugLog('  ✅ Focused agent panel');
-        } catch (err) {
-            debugLog(`  ❌ Focus failed: ${err.message}`);
-        }
-
-        // Small delay after focus
-        await new Promise(r => setTimeout(r, 200));
-
-        for (const cmd of ACCEPT_COMMANDS) {
+        for (const key of allChatKeys) {
             try {
-                const result = await vscode.commands.executeCommand(cmd);
-                debugLog(`  ${cmd} → ${JSON.stringify(result)}`);
+                const val = chatConfig.get(key);
+                const inspect = chatConfig.inspect(key);
+                log(`  chat.${key}:`);
+                log(`    current = ${JSON.stringify(val)}`);
+                log(`    default = ${JSON.stringify(inspect?.defaultValue)}`);
+                log(`    global  = ${JSON.stringify(inspect?.globalValue)}`);
             } catch (err) {
-                debugLog(`  ${cmd} → ERROR: ${err.message || err}`);
+                log(`  chat.${key}: ERROR - ${err.message}`);
             }
         }
-        debugLog('═══════════════════════════════════');
 
-        try {
-            fs.writeFileSync(DEBUG_OUTPUT_FILE, debugLines.join('\n'), 'utf8');
-            debugLog(`\n📁 Written to: ${DEBUG_OUTPUT_FILE}`);
-        } catch (err) {
-            debugLog(`Write failed: ${err.message}`);
+        // Also check antigravity-specific settings
+        const antigravityConfig = vscode.workspace.getConfiguration('antigravity');
+        log('\n  Antigravity settings:');
+        for (const key of ['terminalExecutionPolicy', 'terminalAutoExecutionPolicy', 'autoApprove']) {
+            try {
+                const val = antigravityConfig.get(key);
+                if (val !== undefined) {
+                    log(`    antigravity.${key} = ${JSON.stringify(val)}`);
+                }
+            } catch { }
         }
+
+        // Try all known accept commands
+        log('\n🧪 Testing accept commands...');
+        const cmds = [
+            'antigravity.agent.acceptAgentStep',
+            'antigravity.command.accept',
+            'antigravity.terminalCommand.accept',
+            'antigravity.terminalCommand.run',
+        ];
+        for (const cmd of cmds) {
+            try {
+                const result = await vscode.commands.executeCommand(cmd);
+                log(`  ${cmd} → ${JSON.stringify(result)}`);
+            } catch (err) {
+                log(`  ${cmd} → ERROR: ${err.message}`);
+            }
+        }
+
+        log('═══════════════════════════════════');
     });
 
     // Config listener
     const configListener = vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration('autoRunCommand')) {
+        if (e.affectsConfiguration('autoRunCommand.enabled')) {
             const newConfig = vscode.workspace.getConfiguration('autoRunCommand');
             const newEnabled = newConfig.get('enabled', true);
             if (newEnabled !== isEnabled) {
                 isEnabled = newEnabled;
                 updateStatusBar();
-                if (isEnabled) startPolling();
-                else stopPolling();
+                if (isEnabled) applyAutoApproveSettings();
+                else restoreOriginalSettings();
             }
-            if (e.affectsConfiguration('autoRunCommand.intervalMs') && isEnabled) {
-                stopPolling();
-                startPolling();
-            }
-            log('⚙️ Configuration updated');
         }
     });
 
@@ -163,54 +146,57 @@ function activate(context) {
         configListener
     );
 
-    if (isEnabled) startPolling();
+    // Apply settings on startup
+    if (isEnabled) {
+        applyAutoApproveSettings();
+    }
 
     log('🎯 Auto Run Command is ready!');
     log('⌨️ Toggle: Ctrl+Shift+Alt+A | Debug: "Auto Run Command: Debug"');
 }
 
-function startPolling() {
-    if (pollingInterval) clearInterval(pollingInterval);
+/**
+ * Backup current settings then apply auto-approve settings
+ */
+async function applyAutoApproveSettings() {
+    log('⚙️ Applying auto-approve settings...');
 
-    const config = vscode.workspace.getConfiguration('autoRunCommand');
-    const intervalMs = config.get('intervalMs', 300);
-    log(`🔄 Polling started (every ${intervalMs}ms)`);
+    for (const [key, value] of Object.entries(AUTO_APPROVE_SETTINGS)) {
+        try {
+            const config = vscode.workspace.getConfiguration();
+            const inspect = config.inspect(key);
 
-    pollingInterval = setInterval(async () => {
-        if (!isEnabled) return;
-        await executeAcceptCommands();
-    }, intervalMs);
-}
+            // Backup original value
+            originalSettings[key] = inspect?.globalValue;
 
-function stopPolling() {
-    if (pollingInterval) {
-        clearInterval(pollingInterval);
-        pollingInterval = null;
-        log('⏹️ Polling stopped');
+            // Apply new value globally
+            await config.update(key, value, vscode.ConfigurationTarget.Global);
+            log(`  ✅ ${key} = ${JSON.stringify(value)}`);
+        } catch (err) {
+            log(`  ❌ ${key}: ${err.message}`);
+        }
     }
+
+    log('✅ Auto-approve settings applied!');
 }
 
 /**
- * Execute accept commands with focus management.
- * Strategy: focus agent panel → accept step → accept terminal command
+ * Restore original settings when disabled
  */
-async function executeAcceptCommands() {
-    try {
-        // Step 1: Focus the agent panel to satisfy context keys
-        // This is needed because commands check antigravity.canAcceptOrRejectCommand
-        await vscode.commands.executeCommand('antigravity.agentPanel.focus');
-    } catch {
-        // silently skip
-    }
+async function restoreOriginalSettings() {
+    log('⚙️ Restoring original settings...');
 
-    // Step 2: Execute all accept commands
-    for (const cmd of ACCEPT_COMMANDS) {
+    for (const [key, originalValue] of Object.entries(originalSettings)) {
         try {
-            await vscode.commands.executeCommand(cmd);
-        } catch {
-            // silently skip
+            const config = vscode.workspace.getConfiguration();
+            await config.update(key, originalValue, vscode.ConfigurationTarget.Global);
+            log(`  ↩️ ${key} = ${JSON.stringify(originalValue)}`);
+        } catch (err) {
+            log(`  ❌ ${key}: ${err.message}`);
         }
     }
+
+    log('↩️ Settings restored!');
 }
 
 function updateStatusBar() {
@@ -231,7 +217,8 @@ function log(message) {
 }
 
 function deactivate() {
-    stopPolling();
+    // Optionally restore settings on deactivate
+    // restoreOriginalSettings();
     log('👋 Extension deactivated');
 }
 
