@@ -1,0 +1,72 @@
+{
+  "name": "auto-run-command",
+  "displayName": "Auto Run Command",
+  "description": "Tự động accept tất cả các command approval prompts của Antigravity agent",
+  "version": "1.0.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "autoRunCommand.toggle",
+        "title": "Auto Run Command: Toggle On/Off"
+      },
+      {
+        "command": "autoRunCommand.showLog",
+        "title": "Auto Run Command: Show Log"
+      },
+      {
+        "command": "autoRunCommand.debug",
+        "title": "Auto Run Command: Debug - List All Commands"
+      }
+    ],
+    "configuration": {
+      "title": "Auto Run Command",
+      "properties": {
+        "autoRunCommand.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Bật/tắt auto accept commands"
+        },
+        "autoRunCommand.intervalMs": {
+          "type": "number",
+          "default": 300,
+          "minimum": 100,
+          "maximum": 5000,
+          "description": "Polling interval (ms) - tần suất gọi accept commands"
+        },
+        "autoRunCommand.autoAcceptFileEdits": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tự động accept file edits"
+        },
+        "autoRunCommand.autoAcceptTerminalCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Tự động accept terminal commands"
+        },
+        "autoRunCommand.tryExtendedCommands": {
+          "type": "boolean",
+          "default": true,
+          "description": "Thử thêm các extended accept commands (experimental)"
+        }
+      }
+    },
+    "keybindings": [
+      {
+        "command": "autoRunCommand.toggle",
+        "key": "ctrl+shift+alt+a",
+        "mac": "cmd+shift+alt+a"
+      }
+    ]
+  }
+}
